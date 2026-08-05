@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# Agent instructions (local only)
+.agents/
+
+# Project docs (local reference, not tracked)
+PRD.md
+ARCHITECTURE.md
+IMPLEMENTATION.md

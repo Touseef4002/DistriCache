@@ -1,0 +1,24 @@
+{
+  "name": "districache",
+  "version": "1.0.0",
+  "description": "A distributed in-memory key-value cache built from first principles",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --forceExit"
+  },
+  "keywords": [
+    "cache",
+    "distributed",
+    "lru",
+    "consistent-hashing",
+    "tcp"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "@jest/globals": "^29.7.0"
+  }
+}
