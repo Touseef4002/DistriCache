@@ -39,6 +39,7 @@ import net from 'node:net';
 import { createParser } from './parser.js';
 import { Store } from './store.js';
 import { createLogger } from './logger.js';
+import { createSweeper } from './sweeper.js';
 
 // ─── Configuration from environment ───────────────────────────────────
 const PORT = parseInt(process.env.PORT, 10) || 7000;
@@ -122,10 +123,9 @@ const COMMANDS = {
    * SET key value [EX seconds]
    *
    * Stores a key-value pair. Optionally sets a TTL (EX = "expire in N seconds").
-   *
-   * In Phase 1, the EX argument is parsed but TTL is not enforced yet.
-   * We parse it now so the protocol handling is complete; Phase 2 adds
-   * the actual expiry logic in the Store.
+   * If the store is at capacity and the key is new, the LRU entry is evicted.
+   * If EX is provided, the key will be lazily expired on GET and actively
+   * swept by the background sweeper.
    *
    * Argument validation:
    *   - Requires at least 2 args (key and value)
@@ -139,8 +139,6 @@ const COMMANDS = {
     const [key, value, ...rest] = args;
 
     // Parse optional EX argument
-    // In Phase 1, we accept and validate EX but don't wire up TTL yet.
-    // This keeps the protocol parsing complete and correct from day one.
     let ttlSeconds = null;
     if (rest.length >= 2 && rest[0].toUpperCase() === 'EX') {
       ttlSeconds = parseInt(rest[1], 10);
@@ -149,7 +147,7 @@ const COMMANDS = {
       }
     }
 
-    cacheStore.set(key, value);
+    cacheStore.set(key, value, ttlSeconds);
     return simpleString('OK');
   },
 
@@ -160,7 +158,8 @@ const COMMANDS = {
    *   - Hit: returns the value as a bulk string ($<len>\r\n<value>\r\n)
    *   - Miss: returns null bulk string ($-1\r\n)
    *
-   * In Phase 2, GET will also trigger lazy TTL expiry (check expiresAt).
+   * Lazy TTL expiry is handled inside store.get() — if the key exists
+   * but is expired, it's deleted and null is returned.
    */
   GET(args, cacheStore) {
     if (args.length < 1) {
@@ -253,13 +252,21 @@ function startServer() {
 
   server.listen(PORT, () => {
     log.info(`DistriCache node "${NODE_ID}" listening on port ${PORT}`);
+    log.info(`capacity: ${store.maxEntries} entries (LRU eviction)`);
   });
+
+  // ─── Start active expiry sweeper ──────────────────────────────────
+  // The sweeper runs in the background, sampling random keys and deleting
+  // expired ones. It complements lazy expiry (on GET) to prevent memory
+  // leaks from expired keys that are never read again.
+  const sweeper = createSweeper(store, { logger: log });
 
   // ─── Graceful shutdown ────────────────────────────────────────────
   // Handle SIGTERM/SIGINT for clean Docker container stops.
   // Without this, Docker would forcefully kill the process after a timeout.
   function shutdown(signal) {
     log.info(`received ${signal}, shutting down...`);
+    sweeper.stop();
     server.close(() => {
       log.info('server closed');
       process.exit(0);

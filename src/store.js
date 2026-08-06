@@ -1,5 +1,5 @@
 /**
- * store.js — In-memory key-value store with LRU tracking.
+ * store.js — In-memory key-value store with LRU eviction and TTL expiry.
  *
  * THE O(1) LRU CACHE PATTERN
  * ══════════════════════════
@@ -19,28 +19,54 @@
  * The list provides O(1) eviction of the least recently used entry.
  * Together, every operation (get, set, del, evict) is O(1).
  *
- * PHASE 1 SCOPE
- * ─────────────
- * In Phase 1, we build the core get/set/del without capacity-based eviction
- * or TTL. The LRU list is wired up for recency tracking, but `maxEntries`
- * eviction and TTL lazy/active expiry are added in Phase 2.
+ * EVICTION (Phase 2)
+ * ──────────────────
+ * When the store reaches its `maxEntries` capacity and a new (non-existing)
+ * key is being SET, the least recently used entry (tail of the list) is
+ * evicted to make room. This is the classic LRU eviction policy.
  *
- * Even without eviction, the LRU list is operational: every access updates
- * recency order. This lets us write tests now that verify the ordering
- * is correct, which Phase 2 will rely on for eviction correctness.
+ * The eviction unit is **entry count**, not byte-level memory. This is
+ * simpler to implement and reason about, and sufficient for a portfolio
+ * project. Byte-level eviction would require tracking the memory size of
+ * every key and value, which adds complexity without much learning value.
  *
- * STATS TRACKING
- * ──────────────
- * We track basic counters (hits, misses, total commands) from the start.
- * These feed into the INFO command (Phase 4) and are useful for debugging
- * and benchmarking. Tracking them now costs almost nothing and saves
- * retrofitting later.
+ * TTL EXPIRY (Phase 2)
+ * ────────────────────
+ * Two complementary mechanisms ensure expired keys are both correct and reclaimed:
+ *
+ *   1. LAZY EXPIRY: On every GET, check if the key's TTL has passed.
+ *      If expired, delete it and return null. This guarantees correctness —
+ *      an expired key is never returned, even if active expiry hasn't
+ *      scanned it yet. Cost: one timestamp comparison per GET (essentially free).
+ *
+ *   2. ACTIVE EXPIRY: A background sweeper (sweeper.js) periodically samples
+ *      random keys and deletes expired ones. This prevents memory leaks from
+ *      expired keys that are never read again. The sweeper calls
+ *      `store.deleteIfExpired()` on sampled keys.
+ *
+ * WHY BOTH?
+ *   - Lazy only: correct, but expired keys that are never GET'd leak memory forever.
+ *   - Active only: reclaims memory, but there's a race window where a GET could
+ *     return an expired value between sweeps.
+ *   - Both: correct AND memory-efficient. Hot keys (frequently read) are lazily
+ *     expired. Cold keys (never read again) are actively swept.
+ *
+ * This is exactly how Redis handles expiry internally.
  */
 
 import { Node, DoublyLinkedList } from './lru.js';
 
 export class Store {
-  constructor() {
+  /**
+   * @param {object} [options]
+   * @param {number} [options.maxEntries=10000] - Maximum number of entries before LRU eviction kicks in.
+   *   Uses the MAX_ENTRIES env var as default if available.
+   */
+  constructor(options = {}) {
+    /** @type {number} Maximum entries before eviction. */
+    this.maxEntries = options.maxEntries
+      ?? (process.env.MAX_ENTRIES ? parseInt(process.env.MAX_ENTRIES, 10) : 10000);
+
     /** @type {Map<string, Node>} key → Node (for O(1) lookup) */
     this.map = new Map();
 
@@ -53,8 +79,8 @@ export class Store {
       misses: 0,       // GET miss (key not found or expired)
       totalSets: 0,    // Total SET commands processed
       totalDels: 0,    // Total DEL commands processed (successful deletions)
-      evictions: 0,    // LRU evictions (will be used in Phase 2)
-      expiredKeys: 0,  // Keys removed due to TTL (will be used in Phase 2)
+      evictions: 0,    // LRU evictions when at capacity
+      expiredKeys: 0,  // Keys removed due to TTL (lazy + active)
     };
   }
 
@@ -65,13 +91,32 @@ export class Store {
    * as "most recently used"), which protects it from being the next eviction
    * victim. This is the core LRU behavior.
    *
+   * LAZY EXPIRY: If the key exists but its TTL has passed, it is deleted
+   * and treated as a miss. This guarantees correctness — an expired key
+   * is never returned to the caller.
+   *
    * @param {string} key
-   * @returns {string|null} The value, or null if the key doesn't exist.
+   * @returns {string|null} The value, or null if the key doesn't exist or is expired.
    */
   get(key) {
     const node = this.map.get(key);
 
     if (!node) {
+      this.stats.misses++;
+      return null;
+    }
+
+    // ─── Lazy expiry check ───────────────────────────────────────
+    // If this key has a TTL and it's past the expiration time, treat
+    // it as if the key doesn't exist. Delete it from both data structures.
+    //
+    // This is O(1) — just one timestamp comparison on every GET.
+    // The alternative (checking all keys on a timer) is O(n) per sweep.
+    // Lazy expiry handles the hot path (frequently accessed keys) for free.
+    if (node.expiresAt !== null && node.expiresAt <= Date.now()) {
+      this.map.delete(key);
+      this.list.remove(node);
+      this.stats.expiredKeys++;
       this.stats.misses++;
       return null;
     }
@@ -83,29 +128,46 @@ export class Store {
   }
 
   /**
-   * Store a key-value pair.
+   * Store a key-value pair, optionally with a TTL.
    *
    * If the key already exists, its value is updated and it's moved to the
    * front of the LRU list (same as a GET — accessing a key refreshes its recency).
+   * If a new TTL is provided, it replaces the old one.
    *
-   * If the key is new, a new node is created and inserted at the front.
-   *
-   * Note: In Phase 2, this method will also handle capacity-based eviction
-   * (when map.size >= maxEntries) and TTL via the `expiresAt` field.
+   * If the key is new and the store is at capacity, the least recently used
+   * entry is evicted before inserting the new one.
    *
    * @param {string} key
    * @param {string} value
+   * @param {number|null} [ttlSeconds=null] - Time-to-live in seconds, or null for no expiry.
    */
-  set(key, value) {
+  set(key, value, ttlSeconds = null) {
     const existing = this.map.get(key);
 
     if (existing) {
       // Key exists → update value, refresh recency
       existing.value = value;
+      existing.expiresAt = ttlSeconds !== null
+        ? Date.now() + (ttlSeconds * 1000)
+        : null;
       this.list.moveToFront(existing);
     } else {
+      // ─── LRU eviction ───────────────────────────────────────────
+      // If at capacity, remove the least recently used entry (tail of list)
+      // to make room for the new key.
+      //
+      // Why check `>=` instead of `>`?
+      // Because we're about to add one more entry. If size == maxEntries,
+      // adding one more would exceed capacity, so we evict first.
+      if (this.map.size >= this.maxEntries) {
+        this._evict();
+      }
+
       // New key → create node, insert into both HashMap and LRU list
       const node = new Node(key, value);
+      node.expiresAt = ttlSeconds !== null
+        ? Date.now() + (ttlSeconds * 1000)
+        : null;
       this.map.set(key, node);
       this.list.addToFront(node);
     }
@@ -138,7 +200,11 @@ export class Store {
   }
 
   /**
-   * Check if a key exists in the store.
+   * Check if a key exists and is not expired.
+   *
+   * Does NOT trigger lazy expiry — this is a passive check.
+   * (Lazy expiry only fires on GET, matching Redis behavior.)
+   *
    * @param {string} key
    * @returns {boolean}
    */
@@ -148,9 +214,84 @@ export class Store {
 
   /**
    * Return the number of keys currently in the store.
+   * Note: This includes keys that may be expired but haven't been lazily or actively cleaned yet.
    * @returns {number}
    */
   size() {
     return this.map.size;
+  }
+
+  /**
+   * Set or update the TTL on an existing key.
+   *
+   * This is used by the EXPIRE command (Phase 4):
+   *   EXPIRE key 60 → set the key to expire in 60 seconds
+   *
+   * Returns 1 if the key exists (TTL was set), 0 if it doesn't.
+   *
+   * @param {string} key
+   * @param {number} ttlSeconds - Time-to-live in seconds
+   * @returns {number} 1 if key exists, 0 if not
+   */
+  setExpiry(key, ttlSeconds) {
+    const node = this.map.get(key);
+    if (!node) return 0;
+
+    node.expiresAt = Date.now() + (ttlSeconds * 1000);
+    return 1;
+  }
+
+  /**
+   * Check if a specific key is expired and delete it if so.
+   *
+   * This is called by the active expiry sweeper (sweeper.js) on sampled keys.
+   * Returns true if the key was expired and deleted.
+   *
+   * Unlike lazy expiry (which fires on GET), this is called proactively by
+   * the background sweep to reclaim memory from keys that are never read.
+   *
+   * @param {string} key
+   * @returns {boolean} true if the key was expired and deleted
+   */
+  deleteIfExpired(key) {
+    const node = this.map.get(key);
+    if (!node) return false;
+    if (node.expiresAt === null) return false;
+    if (node.expiresAt > Date.now()) return false;
+
+    // Key is expired — remove it
+    this.map.delete(key);
+    this.list.remove(node);
+    this.stats.expiredKeys++;
+    return true;
+  }
+
+  /**
+   * Get all keys in the store. Used by the sweeper for random sampling.
+   *
+   * WHY NOT ITERATE THE MAP DIRECTLY IN THE SWEEPER?
+   * We expose this method instead of the Map itself to maintain encapsulation.
+   * The sweeper shouldn't know about the store's internal data structures.
+   *
+   * @returns {IterableIterator<string>}
+   */
+  keys() {
+    return this.map.keys();
+  }
+
+  /**
+   * Evict the least recently used entry.
+   *
+   * Removes the node just before the tail sentinel — the entry that
+   * hasn't been accessed for the longest time.
+   *
+   * @private
+   */
+  _evict() {
+    const evicted = this.list.removeLast();
+    if (evicted) {
+      this.map.delete(evicted.key);
+      this.stats.evictions++;
+    }
   }
 }
