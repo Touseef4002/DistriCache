@@ -99,15 +99,34 @@ export function createSweeper(store, options = {}) {
 
     let expiredCount = 0;
 
-    for (let i = 0; i < sampleCount; i++) {
-      // Pick a random key from the entire keyspace.
-      // Math.random() is fine here — we don't need cryptographic randomness,
-      // just roughly uniform sampling.
-      const randomIndex = Math.floor(Math.random() * allKeys.length);
-      const key = allKeys[randomIndex];
+    // If we can afford to check every key within our batch budget, do it
+    // deterministically. Random sampling with replacement is only useful
+    // when batchSize < total keys — otherwise we'd waste picks re-sampling
+    // the same key and probabilistically miss others.
+    //
+    // Example of the bug this prevents:
+    //   3 keys, batchSize=3 → 3 random picks from 3 keys (with replacement)
+    //   P(miss at least one key) = 1 - 3!/3^3 ≈ 78%
+    //   That's not a test problem — it's a real-world correctness gap.
+    if (sampleCount >= allKeys.length) {
+      // Full scan — check every key
+      for (let i = 0; i < allKeys.length; i++) {
+        if (store.deleteIfExpired(allKeys[i])) {
+          expiredCount++;
+        }
+      }
+    } else {
+      // Random sampling — batchSize < total keys
+      for (let i = 0; i < sampleCount; i++) {
+        // Pick a random key from the entire keyspace.
+        // Math.random() is fine here — we don't need cryptographic randomness,
+        // just roughly uniform sampling.
+        const randomIndex = Math.floor(Math.random() * allKeys.length);
+        const key = allKeys[randomIndex];
 
-      if (store.deleteIfExpired(key)) {
-        expiredCount++;
+        if (store.deleteIfExpired(key)) {
+          expiredCount++;
+        }
       }
     }
 

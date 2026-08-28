@@ -1,0 +1,27 @@
+# Dependencies — installed inside the container via npm ci
+node_modules/
+
+# Tests — not needed in production image
+test/
+
+# Benchmarks — not needed in production image
+benchmark/
+
+# Git history — not needed in production image
+.git/
+.gitignore
+
+# Documentation — not needed in production image
+*.md
+LICENSE
+
+# GitHub Actions — not needed in production image
+.github/
+
+# Agent config — not needed in production image
+.agents/
+
+# Docker files — prevent recursive builds
+Dockerfile
+docker-compose.yml
+.dockerignore

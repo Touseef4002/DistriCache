@@ -1,0 +1,49 @@
+# ─── DistriCache 3-Node Cluster ──────────────────────────────────────
+#
+# Runs 3 independent cache nodes on one machine, simulating a distributed
+# cluster. Each node listens on port 7000 inside its container, mapped
+# to different host ports (7000, 7001, 7002).
+#
+# USAGE:
+#   docker-compose up -d          # Start the cluster
+#   docker-compose logs -f        # Watch all node logs
+#   docker-compose stop node-b    # Simulate a node failure
+#   docker-compose start node-b   # Recover the node
+#   docker-compose down           # Tear down everything
+#
+# Connect a client to: ['localhost:7000', 'localhost:7001', 'localhost:7002']
+# Or test manually: telnet localhost 7000
+
+services:
+  node-a:
+    build: .
+    ports:
+      - "7000:7000"
+    environment:
+      - PORT=7000
+      - NODE_ID=node-a
+      - MAX_ENTRIES=10000
+      - LOG_LEVEL=info
+    command: node src/server.js
+
+  node-b:
+    build: .
+    ports:
+      - "7001:7000"
+    environment:
+      - PORT=7000
+      - NODE_ID=node-b
+      - MAX_ENTRIES=10000
+      - LOG_LEVEL=info
+    command: node src/server.js
+
+  node-c:
+    build: .
+    ports:
+      - "7002:7000"
+    environment:
+      - PORT=7000
+      - NODE_ID=node-c
+      - MAX_ENTRIES=10000
+      - LOG_LEVEL=info
+    command: node src/server.js
