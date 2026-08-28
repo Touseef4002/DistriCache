@@ -34,7 +34,8 @@ describe('Sweeper', () => {
     // Fast-forward past TTL
     Date.now = () => realNow() + 2000;
 
-    // Run a single sweep with a large batch so all keys are sampled
+    // batchSize (100) > key count (3), so the sweeper will do a full
+    // deterministic scan instead of random sampling — one sweep is enough.
     const sweeper = createSweeper(store, { intervalMs: 999999, batchSize: 100 });
 
     sweeper._sweep();
@@ -104,6 +105,8 @@ describe('Sweeper', () => {
 
     Date.now = () => realNow() + 2000;
 
+    // One sweep is enough — batchSize (100) > key count (2) triggers
+    // deterministic full scan.
     const sweeper = createSweeper(store, { intervalMs: 999999, batchSize: 100 });
     sweeper._sweep();
     sweeper.stop();

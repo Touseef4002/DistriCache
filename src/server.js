@@ -36,21 +36,12 @@
  */
 
 import net from 'node:net';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import { createParser } from './parser.js';
 import { Store } from './store.js';
 import { createLogger } from './logger.js';
 import { createSweeper } from './sweeper.js';
-
-// ─── Configuration from environment ───────────────────────────────────
-const PORT = parseInt(process.env.PORT, 10) || 7000;
-const NODE_ID = process.env.NODE_ID || `node-${PORT}`;
-
-// ─── Initialize core components ───────────────────────────────────────
-const log = createLogger({ nodeId: NODE_ID });
-const store = new Store();
-
-// Track server start time for INFO command (Phase 4)
-const startTime = Date.now();
 
 // ─── Response formatting helpers ──────────────────────────────────────
 
@@ -115,7 +106,7 @@ const COMMANDS = {
    * Used by the client's health checker (Phase 4) to detect if a node is alive.
    * Also useful for manual testing: `telnet localhost 7000` → `PING` → `+PONG`
    */
-  PING(_args, _store) {
+  PING(_args, _store, _ctx) {
     return simpleString('PONG');
   },
 
@@ -131,7 +122,7 @@ const COMMANDS = {
    *   - Requires at least 2 args (key and value)
    *   - EX requires a positive integer
    */
-  SET(args, cacheStore) {
+  SET(args, cacheStore, _ctx) {
     if (args.length < 2) {
       return errorString('wrong number of arguments for SET');
     }
@@ -161,7 +152,7 @@ const COMMANDS = {
    * Lazy TTL expiry is handled inside store.get() — if the key exists
    * but is expired, it's deleted and null is returned.
    */
-  GET(args, cacheStore) {
+  GET(args, cacheStore, _ctx) {
     if (args.length < 1) {
       return errorString('wrong number of arguments for GET');
     }
@@ -184,7 +175,7 @@ const COMMANDS = {
    * This matches Redis semantics — the return value tells the caller
    * whether the key actually existed, which is useful for conditional logic.
    */
-  DEL(args, cacheStore) {
+  DEL(args, cacheStore, _ctx) {
     if (args.length < 1) {
       return errorString('wrong number of arguments for DEL');
     }
@@ -192,26 +183,127 @@ const COMMANDS = {
     const count = cacheStore.del(args[0]);
     return integerReply(count);
   },
+
+  /**
+   * EXPIRE key seconds
+   *
+   * Sets or updates the TTL on an existing key (FR-10, P2).
+   * Returns :1 if the key exists and the TTL was set, :0 if the key doesn't exist.
+   *
+   * This is separate from SET's EX option because it allows setting/changing
+   * TTL on a key AFTER it was stored — useful when the expiry decision is
+   * made separately from the write.
+   *
+   * Matches Redis EXPIRE semantics.
+   */
+  EXPIRE(args, cacheStore, _ctx) {
+    if (args.length < 2) {
+      return errorString('wrong number of arguments for EXPIRE');
+    }
+
+    const [key, secondsStr] = args;
+    const seconds = parseInt(secondsStr, 10);
+
+    if (isNaN(seconds) || seconds <= 0) {
+      return errorString('invalid expire time in EXPIRE');
+    }
+
+    const result = cacheStore.setExpiry(key, seconds);
+    return integerReply(result);
+  },
+
+  /**
+   * INFO — Server statistics (FR-11, P2).
+   *
+   * Returns a multi-line bulk string with server stats, grouped into sections.
+   * Format matches ARCHITECTURE.md §13.2:
+   *
+   *   # Server
+   *   node_id: node-a
+   *   uptime_seconds: 3600
+   *   port: 7000
+   *
+   *   # Stats
+   *   keys: 8542
+   *   ...
+   *
+   * WHY A BULK STRING INSTEAD OF MULTIPLE SIMPLE STRINGS?
+   * Multi-line output needs to be sent as a single response so the client's
+   * response parser can treat it as one unit. A bulk string with $<len>\r\n
+   * is the natural fit — the length prefix tells the client exactly how
+   * many bytes to read, even though the content contains \r\n sequences.
+   */
+  INFO(_args, cacheStore, ctx) {
+    const uptimeSeconds = Math.floor((Date.now() - ctx.startTime) / 1000);
+
+    const lines = [
+      '# Server',
+      `node_id: ${ctx.nodeId}`,
+      `uptime_seconds: ${uptimeSeconds}`,
+      `port: ${ctx.port}`,
+      '',
+      '# Stats',
+      `keys: ${cacheStore.size()}`,
+      `expired_keys: ${cacheStore.stats.expiredKeys}`,
+      `evicted_keys: ${cacheStore.stats.evictions}`,
+      `total_commands: ${ctx.totalCommands}`,
+      `connections_active: ${ctx.activeConnections}`,
+      '',
+      '# Memory',
+      `max_entries: ${cacheStore.maxEntries}`,
+    ];
+
+    const body = lines.join('\r\n');
+    return bulkString(body);
+  },
 };
 
-// ─── TCP Server ──────────────────────────────────────────────────────
+// ─── Server Factory ──────────────────────────────────────────────────
 
 /**
- * Create and start the TCP server.
+ * Create a DistriCache server instance with explicit configuration.
  *
- * Each incoming connection gets:
- *   - Its own parser instance (to handle TCP stream buffering per-connection)
- *   - Event handlers for data, error, and close
+ * WHY A FACTORY FUNCTION?
+ * ───────────────────────
+ * The original `startServer()` read config from env vars and auto-started
+ * on import. That works for `node src/server.js` but makes integration
+ * testing impossible — you can't start 3 servers on different ports
+ * from the same test process.
  *
- * The server is a standard Node.js `net.createServer()` — the built-in
- * TCP server. No frameworks, no dependencies.
+ * This factory accepts explicit options, returns an object with `start()`
+ * and `close()` methods, and exposes the underlying store for inspection.
+ * The old auto-start behavior is preserved at the bottom of this file
+ * behind an `isMainModule` guard.
  *
- * @returns {net.Server} The TCP server instance
+ * @param {object} [options]
+ * @param {number} [options.port=7000]          - TCP port to listen on
+ * @param {string} [options.nodeId]             - Node identifier for logging
+ * @param {number} [options.maxEntries=10000]   - LRU cache capacity
+ * @returns {{ start: () => Promise<void>, close: () => Promise<void>, store: Store, server: net.Server }}
  */
-function startServer() {
+export function createCacheServer(options = {}) {
+  const port = options.port ?? (parseInt(process.env.PORT, 10) || 7000);
+  const nodeId = options.nodeId ?? process.env.NODE_ID ?? `node-${port}`;
+  const maxEntries = options.maxEntries ?? (process.env.MAX_ENTRIES ? parseInt(process.env.MAX_ENTRIES, 10) : 10000);
+
+  const log = createLogger({ nodeId, level: options.logLevel });
+  const store = new Store({ maxEntries });
+  const startTime = Date.now();
+
+  // ─── Counters for INFO command ──────────────────────────────────
+  // These are tracked at the server level (not in the store) because
+  // they're network-layer stats, not storage-layer stats.
+  let activeConnections = 0;
+  let totalCommands = 0;
+
+  // Context object passed to command handlers that need server-level info
+  // (currently only INFO uses it, but the pattern is extensible).
+  const ctx = { nodeId, port, startTime, get activeConnections() { return activeConnections; }, get totalCommands() { return totalCommands; } };
+
   const server = net.createServer((socket) => {
     const remoteAddr = `${socket.remoteAddress}:${socket.remotePort}`;
     log.info(`client connected: ${remoteAddr}`);
+    activeConnections++;
 
     // Each connection gets its own parser for TCP stream buffering
     const parser = createParser();
@@ -221,6 +313,7 @@ function startServer() {
 
       for (const { command, args } of commands) {
         log.debug(`${command} ${args.join(' ')}`);
+        totalCommands++;
 
         const handler = COMMANDS[command];
 
@@ -229,15 +322,12 @@ function startServer() {
           continue;
         }
 
-        const response = handler(args, store);
+        const response = handler(args, store, ctx);
         socket.write(response);
       }
     });
 
     socket.on('error', (err) => {
-      // Client disconnected abruptly (e.g., Ctrl+C in telnet).
-      // ECONNRESET is normal for TCP — the client closed the connection
-      // without sending a FIN. Not worth logging as an error.
       if (err.code === 'ECONNRESET') {
         log.debug(`client reset connection: ${remoteAddr}`);
       } else {
@@ -246,40 +336,77 @@ function startServer() {
     });
 
     socket.on('close', () => {
+      activeConnections--;
       log.info(`client disconnected: ${remoteAddr}`);
     });
   });
 
-  server.listen(PORT, () => {
-    log.info(`DistriCache node "${NODE_ID}" listening on port ${PORT}`);
-    log.info(`capacity: ${store.maxEntries} entries (LRU eviction)`);
-  });
-
   // ─── Start active expiry sweeper ──────────────────────────────────
-  // The sweeper runs in the background, sampling random keys and deleting
-  // expired ones. It complements lazy expiry (on GET) to prevent memory
-  // leaks from expired keys that are never read again.
   const sweeper = createSweeper(store, { logger: log });
 
-  // ─── Graceful shutdown ────────────────────────────────────────────
+  return {
+    store,
+    server,
+
+    /**
+     * Start listening on the configured port.
+     * Returns a promise that resolves once the server is listening.
+     */
+    start() {
+      return new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(port, () => {
+          server.removeListener('error', reject);
+          log.info(`DistriCache node "${nodeId}" listening on port ${port}`);
+          log.info(`capacity: ${store.maxEntries} entries (LRU eviction)`);
+          resolve();
+        });
+      });
+    },
+
+    /**
+     * Gracefully close the server and stop the sweeper.
+     * Returns a promise that resolves once the server is fully closed.
+     */
+    close() {
+      return new Promise((resolve) => {
+        sweeper.stop();
+        server.close(() => {
+          log.info('server closed');
+          resolve();
+        });
+        // Destroy any remaining open connections so close() doesn't hang.
+        // Without this, the server waits for all clients to disconnect,
+        // which can stall test teardown indefinitely.
+        server.unref();
+      });
+    },
+  };
+}
+
+// ─── Auto-start when run directly ────────────────────────────────────
+// This guard ensures that `node src/server.js` still auto-starts,
+// but importing this module from a test doesn't.
+//
+// We compare the file URL of this module against the process entry point.
+// `import.meta.url` gives us `file:///path/to/server.js`.
+// `process.argv[1]` gives us the OS path that was passed to `node`.
+const isMainModule = process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isMainModule) {
+  const instance = createCacheServer();
+  instance.start();
+
+  // ─── Graceful shutdown ──────────────────────────────────────────
   // Handle SIGTERM/SIGINT for clean Docker container stops.
-  // Without this, Docker would forcefully kill the process after a timeout.
   function shutdown(signal) {
-    log.info(`received ${signal}, shutting down...`);
-    sweeper.stop();
-    server.close(() => {
-      log.info('server closed');
-      process.exit(0);
-    });
+    console.log(`received ${signal}, shutting down...`);
+    instance.close().then(() => process.exit(0));
   }
 
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
-
-  return server;
 }
 
-// ─── Start the server ────────────────────────────────────────────────
-const server = startServer();
-
-export { startServer, store, COMMANDS };
+export { COMMANDS };
