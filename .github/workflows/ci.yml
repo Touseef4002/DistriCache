@@ -1,0 +1,39 @@
+# ─── DistriCache CI Pipeline ──────────────────────────────────────────
+#
+# Runs the full test suite on every push and pull request.
+# Uses GitHub Actions free tier (unlimited for public repos).
+#
+# WHY THIS CONFIGURATION:
+#   - Node 20: matches our Dockerfile base (node:20-alpine)
+#   - ubuntu-latest: fastest runner for Node.js
+#   - npm ci: reproducible installs from lock file (faster than npm install)
+#   - --forceExit: Jest flag to handle open handles from integration tests
+#     (TCP servers need explicit cleanup)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test

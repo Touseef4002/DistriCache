@@ -66,7 +66,7 @@ All routing and failure detection lives in the client.
 |---|---|
 | **Cache Node** | TCP server → command parser → in-memory store (HashMap + LRU list) + TTL expiry |
 | **Client Library** | Consistent hash ring routing, connection pooling, PING-based failure detection |
-| **Tooling** | Benchmark client, Docker Compose orchestration |
+| **Tooling** | Benchmark client, Docker Compose orchestration, GitHub Actions CI |
 
 ---
 
@@ -93,6 +93,27 @@ The classic interview data structure: a **HashMap** for constant-time key lookup
 | Evict LRU | O(1) | Remove node before tail sentinel → delete from HashMap |
 
 The linked list uses **sentinel nodes** (dummy head/tail) to eliminate null-pointer edge cases — the same technique Redis uses internally.
+
+### Consistent Hash Ring
+
+Keys are distributed across nodes using a **consistent hash ring** with **150 virtual nodes** per physical node. This ensures:
+
+- **Minimal remapping**: Adding/removing a node only moves ~K/N keys (not all of them)
+- **Even distribution**: Verified by tests — 10,000 keys across 3 nodes gives a coefficient of variation of 8.8%
+
+```
+         0 / 2³²
+           │
+  ┌────────┴────────┐
+ vA₁               vB₃     ← 150 virtual nodes per physical node
+ /                     \       placed at MD5 hash positions
+vC₂       RING       vA₂
+ \                     /
+  vB₁               vC₁    Key lookup: hash(key) → walk clockwise
+  └────────┬────────┘       → first virtual node hit = owning node
+           │                Binary search: O(log n)
+          180°
+```
 
 ---
 
@@ -131,16 +152,6 @@ COMMAND arg1 arg2 ... argN\r\n
 | `EXPIRE key seconds` | Set TTL on existing key | `:1` or `:0` |
 | `INFO` | Node statistics | Multi-line stats |
 
-### Why text instead of binary?
-
-| | Text (chosen) | Binary (e.g., full RESP) |
-|---|---|---|
-| **Debuggability** | ✅ `telnet` directly | ❌ Needs tooling |
-| **Parse speed** | Slower (string splitting) | Faster (length-prefixed) |
-| **Implementation** | Simpler | More complex |
-
-Text wins here because **debuggability during development and demos outweighs parse speed** at this project's scale. A binary protocol variant is documented as a v2 extension.
-
 ---
 
 ## Getting Started
@@ -168,15 +179,31 @@ Then connect:
 telnet localhost 7000
 
 # Windows (PowerShell)
-# Use ncat, PuTTY, or any TCP client
 ncat localhost 7000
+```
+
+### Run a 3-node cluster (Docker)
+
+```bash
+docker-compose up -d
+
+# Verify all nodes are running:
+# telnet localhost 7000   → PING → +PONG  (node-a)
+# telnet localhost 7001   → PING → +PONG  (node-b)
+# telnet localhost 7002   → PING → +PONG  (node-c)
+
+# Simulate a node failure:
+docker-compose stop node-b
+
+# Tear down:
+docker-compose down
 ```
 
 ### Run tests
 
 ```bash
 npm test
-# → 52 tests passing across 3 test suites
+# → 119 tests passing across 8 test suites
 ```
 
 ### Configuration
@@ -196,32 +223,95 @@ PORT=8000 NODE_ID=cache-1 MAX_ENTRIES=5000 node src/server.js
 
 ---
 
-## Project Structure
+## Client Library
+
+```javascript
+import { DistriCacheClient } from './src/client/index.js';
+
+// Connect to a 3-node cluster
+const client = new DistriCacheClient([
+  'localhost:7000', 'localhost:7001', 'localhost:7002'
+]);
+
+// Basic operations
+await client.set('user:42', 'alice');           // → 'OK'
+await client.get('user:42');                    // → 'alice'
+await client.set('session:abc', 'data', 300);   // TTL: 5 minutes
+await client.del('user:42');                    // → 1
+await client.ping('localhost:7000');             // → 'PONG'
+
+// Health monitoring
+client.getNodeStatus('localhost:7001');          // → 'healthy'
+client.getAllNodeStatuses();                     // → Map { 'localhost:7000' → 'healthy', ... }
+
+// Clean up
+await client.close();
+```
+
+The client automatically:
+- **Routes keys** to the correct node via consistent hashing
+- **Pools TCP connections** (one per node, lazily created)
+- **Detects failures** via periodic PING health checks
+- **Removes dead nodes** from the hash ring (keys remap to surviving nodes)
+- **Recovers nodes** when they come back online
+
+---
+
+## Failure Detection
+
+The client uses a **3-state health checker** that monitors each node via periodic PINGs:
 
 ```
-DistriCache/
-├── src/
-│   ├── server.js            # TCP server, command dispatch, response formatting
-│   ├── parser.js            # Wire protocol parser (stream buffering, quoted strings)
-│   ├── store.js             # HashMap + LRU list (the O(1) cache)
-│   ├── lru.js               # Doubly linked list with sentinel nodes
-│   ├── sweeper.js           # Active TTL expiry (background sweep)
-│   ├── logger.js            # Structured logging (levels, NODE_ID prefix)
-│   └── client/
-│       ├── index.js         # DistriCacheClient (public API)
-│       ├── hash-ring.js     # Consistent hashing with virtual nodes
-│       ├── connection-pool.js  # Persistent TCP connection pooling
-│       └── health-checker.js   # PING-based failure detection
-├── test/
-│   ├── lru.test.js          # Linked list unit tests
-│   ├── parser.test.js       # Protocol parser tests
-│   ├── store.test.js        # Store + LRU ordering tests
-│   └── ...
-├── benchmark/
-│   └── run.js               # Throughput/latency measurement
-├── docker-compose.yml       # 3-node cluster
-├── Dockerfile
-└── package.json             # Zero runtime dependencies
+                PING succeeds
+                     │
+     ┌───────────────▼───────────────┐
+     │           HEALTHY             │
+     │   (node is on the hash ring)  │
+     └───────────────┬───────────────┘
+                     │ PING fails
+                     ▼
+     ┌───────────────────────────────┐
+     │           SUSPECT             │
+     │   (still on ring, watching)   │──── PING succeeds ──→ HEALTHY
+     └───────────────┬───────────────┘
+                     │ 3 consecutive failures
+                     ▼
+     ┌───────────────────────────────┐
+     │            DOWN               │
+     │   (removed from hash ring)    │──── PING succeeds ──→ HEALTHY
+     └───────────────────────────────┘     (re-added to ring)
+```
+
+When a node is marked **DOWN**, it's removed from the hash ring. Its keys remap clockwise to the next healthy node — cache misses for those keys, but the cluster stays available. When the node recovers, it's automatically re-added.
+
+---
+
+## Benchmark Results
+
+Measured on local machine with `node benchmark/run.js`:
+
+| Metric | 1 Node | 3 Nodes |
+|---|---|---|
+| **SET throughput** | 23,803 ops/sec | 25,203 ops/sec |
+| **GET throughput** | 26,824 ops/sec | 28,190 ops/sec |
+| **SET p50 latency** | 0.03ms | 0.03ms |
+| **SET p95 latency** | 0.06ms | 0.05ms |
+| **SET p99 latency** | 0.17ms | 0.15ms |
+| **GET p50 latency** | 0.03ms | 0.03ms |
+| **GET p95 latency** | 0.05ms | 0.04ms |
+| **GET p99 latency** | 0.15ms | 0.10ms |
+
+> Configuration: 10,000 sequential operations, ~15-byte values, localhost, Node.js v20
+
+**Key takeaways:**
+- **Sub-millisecond latency** at all percentiles (p99 < 0.2ms)
+- **Negligible distribution overhead** — 3-node throughput is comparable to 1-node because the hash ring lookup (binary search over 450 entries) is fast relative to TCP I/O
+- **GET is faster than SET** as expected — GET doesn't modify the LRU list tail or check capacity
+
+Run it yourself:
+```bash
+node benchmark/run.js              # Default: 10,000 ops
+node benchmark/run.js --ops 50000  # More operations
 ```
 
 ---
@@ -237,7 +327,7 @@ Every choice is deliberate and explainable:
 | **Eviction unit** | Entry count (not bytes) | Simpler to reason about; sufficient for portfolio scope |
 | **Hash function** | MD5 (for ring) | Available in Node.js stdlib; adequate distribution |
 | **Health check** | Client-side PING | Dramatically simpler than consensus; sufficient for demo |
-| **Virtual nodes** | 150 per physical node | Good distribution at 3 nodes; verified by test |
+| **Virtual nodes** | 150 per physical node | Good distribution at 3 nodes; verified by test (CV=8.8%) |
 | **Replication** | None (v1) | Explicit non-goal; documented as v2 |
 | **Persistence** | None (v1) | Explicit non-goal; documented as v2 |
 | **Runtime deps** | Zero | "Built from scratch" means no hidden frameworks |
@@ -253,15 +343,40 @@ Every choice is deliberate and explainable:
 
 ---
 
-## Build Progress
+## Project Structure
 
-| Phase | Description | Status |
-|---|---|---|
-| 1 | Single-node engine (TCP + parser + store) | ✅ Complete |
-| 2 | LRU eviction + TTL (lazy + active expiry) | 🔲 Not started |
-| 3 | Consistent hashing + client library | 🔲 Not started |
-| 4 | Failure detection + Docker Compose | 🔲 Not started |
-| 5 | Benchmarks + README polish + CI | 🔲 Not started |
+```
+DistriCache/
+├── src/
+│   ├── server.js              # TCP server, command dispatch, response formatting
+│   ├── parser.js              # Wire protocol parser (stream buffering, quoted strings)
+│   ├── store.js               # HashMap + LRU list (the O(1) cache)
+│   ├── lru.js                 # Doubly linked list with sentinel nodes
+│   ├── sweeper.js             # Active TTL expiry (background random sampling)
+│   ├── logger.js              # Structured logging (levels, NODE_ID prefix)
+│   └── client/
+│       ├── index.js           # DistriCacheClient (public API)
+│       ├── hash-ring.js       # Consistent hashing with virtual nodes
+│       ├── connection-pool.js # Persistent TCP connection pooling
+│       └── health-checker.js  # PING-based failure detection state machine
+├── test/                      # 119 tests across 8 suites
+│   ├── lru.test.js            # Linked list unit tests
+│   ├── parser.test.js         # Protocol parser tests
+│   ├── store.test.js          # Store + LRU + TTL tests
+│   ├── sweeper.test.js        # Active expiry sweeper tests
+│   ├── hash-ring.test.js      # Hash ring determinism + remapping tests
+│   ├── distribution.test.js   # Key distribution evenness (statistical)
+│   ├── integration.test.js    # 3-node cluster end-to-end tests
+│   └── health-checker.test.js # Failure detection state machine tests
+├── benchmark/
+│   └── run.js                 # Throughput + latency measurement tool
+├── .github/workflows/
+│   └── ci.yml                 # GitHub Actions: test on push/PR
+├── Dockerfile                 # node:20-alpine, production image
+├── docker-compose.yml         # 3-node cluster orchestration
+├── .dockerignore
+└── package.json               # Zero runtime dependencies
+```
 
 ---
 
@@ -271,6 +386,7 @@ Every choice is deliberate and explainable:
 - **Replication**: Leader-follower for a subset of keys, demonstrating consistency/availability trade-offs
 - **Binary protocol**: Compare parsing performance against text protocol with real benchmarks
 - **Pub/Sub**: Channel-based message broadcasting, mirroring another Redis feature
+- **Pipelining**: Send multiple commands without waiting for each response, measuring concurrent throughput
 
 ---
 
