@@ -145,11 +145,11 @@ COMMAND arg1 arg2 ... argN\r\n
 
 | Command | Description | Response |
 |---|---|---|
-| `SET key value [EX seconds]` | Store a value with optional TTL | `+OK` |
+| `SET key value [EX seconds]` | Store a value with optional positive integer TTL seconds | `+OK` |
 | `GET key` | Retrieve a value | `$<len>\r\n<value>` or `$-1` |
 | `DEL key` | Delete a key | `:<count>` |
 | `PING` | Health check | `+PONG` |
-| `EXPIRE key seconds` | Set TTL on existing key | `:1` or `:0` |
+| `EXPIRE key seconds` | Set positive integer TTL seconds on an existing key | `:1` or `:0` |
 | `INFO` | Node statistics | Multi-line stats |
 
 ---
@@ -214,7 +214,7 @@ All via environment variables — no config files:
 |---|---|---|
 | `PORT` | `7000` | TCP port |
 | `NODE_ID` | `node-<port>` | Identifier for logging |
-| `MAX_ENTRIES` | `10000` | LRU cache capacity |
+| `MAX_ENTRIES` | `10000` | Positive integer LRU cache capacity |
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 
 ```bash

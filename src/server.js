@@ -5,6 +5,7 @@ import { createParser } from './parser.js';
 import { Store } from './store.js';
 import { createLogger } from './logger.js';
 import { createSweeper } from './sweeper.js';
+import { parsePositiveInteger } from './positive-integer.js';
 
 function simpleString(msg) { return `+${msg}\r\n`; }
 function errorString(msg)  { return `-ERR ${msg}\r\n`; }
@@ -24,8 +25,8 @@ const COMMANDS = {
     let ttlSeconds = null;
 
     if (rest.length >= 2 && rest[0].toUpperCase() === 'EX') {
-      ttlSeconds = parseInt(rest[1], 10);
-      if (isNaN(ttlSeconds) || ttlSeconds <= 0) {
+      ttlSeconds = parsePositiveInteger(rest[1]);
+      if (ttlSeconds === null) {
         return errorString('invalid expire time in SET');
       }
     }
@@ -48,8 +49,8 @@ const COMMANDS = {
   EXPIRE(args, store) {
     if (args.length < 2) return errorString('wrong number of arguments for EXPIRE');
 
-    const seconds = parseInt(args[1], 10);
-    if (isNaN(seconds) || seconds <= 0) {
+    const seconds = parsePositiveInteger(args[1]);
+    if (seconds === null) {
       return errorString('invalid expire time in EXPIRE');
     }
 
@@ -86,11 +87,8 @@ const COMMANDS = {
 export function createCacheServer(options = {}) {
   const port = options.port ?? (parseInt(process.env.PORT, 10) || 7000);
   const nodeId = options.nodeId ?? process.env.NODE_ID ?? `node-${port}`;
-  const maxEntries = options.maxEntries
-    ?? (process.env.MAX_ENTRIES ? parseInt(process.env.MAX_ENTRIES, 10) : 10000);
-
   const log = createLogger({ nodeId, level: options.logLevel });
-  const store = new Store({ maxEntries });
+  const store = new Store({ maxEntries: options.maxEntries });
   const startTime = Date.now();
 
   let activeConnections = 0;

@@ -1,10 +1,14 @@
 import { Node, DoublyLinkedList } from './lru.js';
+import { parsePositiveInteger } from './positive-integer.js';
 
 export class Store {
   /** @param {{ maxEntries?: number }} [options] */
   constructor(options = {}) {
-    this.maxEntries = options.maxEntries
-      ?? (process.env.MAX_ENTRIES ? parseInt(process.env.MAX_ENTRIES, 10) : 10000);
+    const configuredMaxEntries = options.maxEntries ?? (process.env.MAX_ENTRIES || 10000);
+    this.maxEntries = parsePositiveInteger(configuredMaxEntries);
+    if (this.maxEntries === null) {
+      throw new RangeError('maxEntries must be a positive safe integer');
+    }
 
     /** @type {Map<string, Node>} */
     this.map = new Map();
@@ -51,6 +55,10 @@ export class Store {
    * @param {number|null} [ttlSeconds]
    */
   set(key, value, ttlSeconds = null) {
+    if (ttlSeconds !== null && parsePositiveInteger(ttlSeconds) === null) {
+      throw new RangeError('ttlSeconds must be a positive safe integer');
+    }
+
     const existing = this.map.get(key);
 
     if (existing) {
@@ -99,6 +107,10 @@ export class Store {
    * @returns {number} 1 if key exists, 0 if not
    */
   setExpiry(key, ttlSeconds) {
+    if (parsePositiveInteger(ttlSeconds) === null) {
+      throw new RangeError('ttlSeconds must be a positive safe integer');
+    }
+
     const node = this.map.get(key);
     if (!node) return 0;
     node.expiresAt = Date.now() + ttlSeconds * 1000;
