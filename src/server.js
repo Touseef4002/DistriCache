@@ -14,17 +14,21 @@ function nullBulk()        { return '$-1\r\n'; }
 function integerReply(n)   { return `:${n}\r\n`; }
 
 const COMMANDS = {
-  PING() {
+  PING(args) {
+    if (args.length !== 0) return errorString('wrong number of arguments for PING');
     return simpleString('PONG');
   },
 
   SET(args, store) {
     if (args.length < 2) return errorString('wrong number of arguments for SET');
+    if (args.length !== 2 && (args.length !== 4 || args[2].toUpperCase() !== 'EX')) {
+      return errorString('syntax error in SET');
+    }
 
     const [key, value, ...rest] = args;
     let ttlSeconds = null;
 
-    if (rest.length >= 2 && rest[0].toUpperCase() === 'EX') {
+    if (rest.length === 2) {
       ttlSeconds = parsePositiveInteger(rest[1]);
       if (ttlSeconds === null) {
         return errorString('invalid expire time in SET');
@@ -36,18 +40,18 @@ const COMMANDS = {
   },
 
   GET(args, store) {
-    if (args.length < 1) return errorString('wrong number of arguments for GET');
+    if (args.length !== 1) return errorString('wrong number of arguments for GET');
     const value = store.get(args[0]);
     return value === null ? nullBulk() : bulkString(value);
   },
 
   DEL(args, store) {
-    if (args.length < 1) return errorString('wrong number of arguments for DEL');
+    if (args.length !== 1) return errorString('wrong number of arguments for DEL');
     return integerReply(store.del(args[0]));
   },
 
   EXPIRE(args, store) {
-    if (args.length < 2) return errorString('wrong number of arguments for EXPIRE');
+    if (args.length !== 2) return errorString('wrong number of arguments for EXPIRE');
 
     const seconds = parsePositiveInteger(args[1]);
     if (seconds === null) {
@@ -57,7 +61,8 @@ const COMMANDS = {
     return integerReply(store.setExpiry(args[0], seconds));
   },
 
-  INFO(_args, store, ctx) {
+  INFO(args, store, ctx) {
+    if (args.length !== 0) return errorString('wrong number of arguments for INFO');
     const uptimeSeconds = Math.floor((Date.now() - ctx.startTime) / 1000);
     const body = [
       '# Server',
