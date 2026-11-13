@@ -59,6 +59,7 @@ export class HealthChecker {
 
     /** @type {Map<string, { state: string, consecutiveFailures: number }>} */
     this.nodeStates = new Map();
+    this._checkingNodes = new Set();
     for (const node of nodes) {
       this.nodeStates.set(node, { state: NodeState.HEALTHY, consecutiveFailures: 0 });
     }
@@ -105,34 +106,39 @@ export class HealthChecker {
    * @private
    */
   async _checkNode(nodeAddress) {
-    const { host, port } = parseAddress(nodeAddress);
-    const success = await pingNode(host, port, this.pingTimeout);
     const entry = this.nodeStates.get(nodeAddress);
-    if (!entry) return;
+    if (!entry || this._checkingNodes.has(nodeAddress)) return;
 
-    const oldState = entry.state;
+    this._checkingNodes.add(nodeAddress);
+    try {
+      const { host, port } = parseAddress(nodeAddress);
+      const success = await pingNode(host, port, this.pingTimeout);
+      const oldState = entry.state;
 
-    if (success) {
-      entry.consecutiveFailures = 0;
+      if (success) {
+        entry.consecutiveFailures = 0;
 
-      if (oldState !== NodeState.HEALTHY) {
-        entry.state = NodeState.HEALTHY;
-        if (oldState === NodeState.DOWN) this.ring.addNode(nodeAddress);
-        this.onStateChange?.(nodeAddress, oldState, NodeState.HEALTHY);
-      }
-    } else {
-      entry.consecutiveFailures++;
-
-      if (entry.consecutiveFailures >= this.failureThreshold) {
-        if (oldState !== NodeState.DOWN) {
-          entry.state = NodeState.DOWN;
-          this.ring.removeNode(nodeAddress);
-          this.onStateChange?.(nodeAddress, oldState, NodeState.DOWN);
+        if (oldState !== NodeState.HEALTHY) {
+          entry.state = NodeState.HEALTHY;
+          if (oldState === NodeState.DOWN) this.ring.addNode(nodeAddress);
+          this.onStateChange?.(nodeAddress, oldState, NodeState.HEALTHY);
         }
-      } else if (oldState !== NodeState.SUSPECT) {
-        entry.state = NodeState.SUSPECT;
-        this.onStateChange?.(nodeAddress, oldState, NodeState.SUSPECT);
+      } else {
+        entry.consecutiveFailures++;
+
+        if (entry.consecutiveFailures >= this.failureThreshold) {
+          if (oldState !== NodeState.DOWN) {
+            entry.state = NodeState.DOWN;
+            this.ring.removeNode(nodeAddress);
+            this.onStateChange?.(nodeAddress, oldState, NodeState.DOWN);
+          }
+        } else if (oldState !== NodeState.SUSPECT) {
+          entry.state = NodeState.SUSPECT;
+          this.onStateChange?.(nodeAddress, oldState, NodeState.SUSPECT);
+        }
       }
+    } finally {
+      this._checkingNodes.delete(nodeAddress);
     }
   }
 }
