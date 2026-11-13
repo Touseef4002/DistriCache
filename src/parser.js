@@ -1,3 +1,5 @@
+const MAX_COMMAND_LENGTH = 64 * 1024;
+
 export function createParser() {
   let buffer = '';
 
@@ -12,6 +14,7 @@ export function createParser() {
     let idx;
 
     while ((idx = buffer.indexOf('\r\n')) !== -1) {
+      if (idx > MAX_COMMAND_LENGTH) throw new RangeError('command exceeds 64 Ki characters');
       const line = buffer.slice(0, idx);
       buffer = buffer.slice(idx + 2);
 
@@ -20,6 +23,8 @@ export function createParser() {
       const parsed = parseLine(line);
       if (parsed) commands.push(parsed);
     }
+
+    if (buffer.length > MAX_COMMAND_LENGTH) throw new RangeError('command exceeds 64 Ki characters');
 
     return commands;
   }
@@ -46,22 +51,31 @@ export function tokenize(line) {
   const tokens = [];
   let current = '';
   let inQuotes = false;
+  let tokenStarted = false;
 
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
 
-    if (char === '"') {
+    if (char === '\\' && inQuotes && (line[i + 1] === '"' || line[i + 1] === '\\')) {
+      current += line[++i];
+      tokenStarted = true;
+    } else if (char === '"') {
       inQuotes = !inQuotes;
-    } else if (char === ' ' && !inQuotes) {
-      if (current.length > 0) {
+      tokenStarted = true;
+    } else if (/\s/.test(char) && !inQuotes) {
+      if (tokenStarted) {
         tokens.push(current);
         current = '';
+        tokenStarted = false;
       }
     } else {
       current += char;
+      tokenStarted = true;
     }
   }
 
-  if (current.length > 0) tokens.push(current);
+  if (inQuotes) throw new SyntaxError('unterminated quoted string');
+  if (tokenStarted) tokens.push(current);
+
   return tokens;
 }

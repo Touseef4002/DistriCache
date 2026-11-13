@@ -112,7 +112,15 @@ export function createCacheServer(options = {}) {
     const parser = createParser();
 
     socket.on('data', (data) => {
-      for (const { command, args } of parser.parse(data)) {
+      let commands;
+      try {
+        commands = parser.parse(data);
+      } catch (err) {
+        socket.end(errorString(err.message));
+        return;
+      }
+
+      for (const { command, args } of commands) {
         log.debug(`${command} ${args.join(' ')}`);
         totalCommands++;
 

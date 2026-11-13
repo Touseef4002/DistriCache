@@ -128,8 +128,8 @@ COMMAND arg1 arg2 ... argN\r\n
 ```
 
 - Commands are case-insensitive (`ping` = `PING` = `Ping`)
-- String values with spaces use double quotes: `"hello world"`
-- Each request is one line terminated by `\r\n`
+- Arguments containing whitespace, quotes, or backslashes use double quotes; `\"` and `\\` escape quotes and backslashes inside quoted arguments.
+- Each request is one line terminated by `\r\n` and limited to 64 Ki characters.
 
 ### Response Format
 

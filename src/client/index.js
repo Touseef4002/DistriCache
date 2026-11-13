@@ -21,6 +21,13 @@ function parseResponse(raw) {
   }
 }
 
+function encodeToken(value) {
+  if (/[\r\n]/.test(value)) throw new Error('Command arguments cannot contain line breaks');
+  return /[\s"\\]/.test(value)
+    ? `"${value.replace(/(["\\])/g, '\\$1')}"`
+    : value;
+}
+
 export class DistriCacheClient {
   /**
    * @param {string[]} nodes
@@ -57,8 +64,7 @@ export class DistriCacheClient {
     const node = this.ring.getNode(key);
     if (!node) throw new Error('No nodes available');
 
-    const quotedValue = value.includes(' ') ? `"${value}"` : value;
-    let command = `SET ${key} ${quotedValue}`;
+    let command = `SET ${encodeToken(key)} ${encodeToken(value)}`;
     if (ttlSeconds != null) command += ` EX ${ttlSeconds}`;
     command += '\r\n';
 
@@ -72,7 +78,7 @@ export class DistriCacheClient {
   async get(key) {
     const node = this.ring.getNode(key);
     if (!node) throw new Error('No nodes available');
-    return parseResponse(await this.pool.send(node, `GET ${key}\r\n`));
+    return parseResponse(await this.pool.send(node, `GET ${encodeToken(key)}\r\n`));
   }
 
   /**
@@ -82,7 +88,7 @@ export class DistriCacheClient {
   async del(key) {
     const node = this.ring.getNode(key);
     if (!node) throw new Error('No nodes available');
-    return parseResponse(await this.pool.send(node, `DEL ${key}\r\n`));
+    return parseResponse(await this.pool.send(node, `DEL ${encodeToken(key)}\r\n`));
   }
 
   /**
