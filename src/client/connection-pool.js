@@ -22,14 +22,29 @@ function createConnection(host, port) {
     return new Promise((resolve, reject) => {
       if (destroyed) return reject(new Error('Connection has been destroyed'));
 
-      socket.connect(port, host, () => {
+      const cleanup = () => {
+        socket.off('connect', onConnect);
+        socket.off('error', onError);
+        socket.off('close', onClose);
+      };
+      const onConnect = () => {
         connected = true;
+        cleanup();
         resolve();
-      });
+      };
+      const onError = (err) => {
+        cleanup();
+        reject(err);
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error('Connection closed before connect'));
+      };
 
-      socket.once('error', (err) => {
-        if (!connected) reject(err);
-      });
+      socket.once('connect', onConnect);
+      socket.once('error', onError);
+      socket.once('close', onClose);
+      socket.connect(port, host);
     });
   }
 
@@ -109,25 +124,46 @@ export class ConnectionPool {
     this.connectTimeout = options.connectTimeout ?? 5000;
     /** @type {Map<string, ReturnType<typeof createConnection>>} */
     this.connections = new Map();
+    this.pendingConnections = new Map();
   }
 
   /** @param {string} nodeAddress @returns {Promise<ReturnType<typeof createConnection>>} */
   async _getConnection(nodeAddress) {
     const existing = this.connections.get(nodeAddress);
     if (existing?.isConnected) return existing;
+    const pending = this.pendingConnections.get(nodeAddress);
+    if (pending) return pending.promise;
 
     const { host, port } = parseAddress(nodeAddress);
     const conn = createConnection(host, port);
-
-    await Promise.race([
-      conn.connect(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error(`Connection to ${nodeAddress} timed out`)), this.connectTimeout)
-      ),
-    ]);
-
-    this.connections.set(nodeAddress, conn);
-    return conn;
+    const pendingConnection = { conn, promise: null };
+    let timer;
+    const connecting = (async () => {
+      try {
+        await Promise.race([
+          conn.connect(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => {
+              conn.close();
+              reject(new Error(`Connection to ${nodeAddress} timed out`));
+            }, this.connectTimeout);
+          }),
+        ]);
+        this.connections.set(nodeAddress, conn);
+        return conn;
+      } catch (err) {
+        conn.close();
+        throw err;
+      } finally {
+        clearTimeout(timer);
+        if (this.pendingConnections.get(nodeAddress) === pendingConnection) {
+          this.pendingConnections.delete(nodeAddress);
+        }
+      }
+    })();
+    pendingConnection.promise = connecting;
+    this.pendingConnections.set(nodeAddress, pendingConnection);
+    return connecting;
   }
 
   /**
@@ -142,6 +178,8 @@ export class ConnectionPool {
 
   async close() {
     for (const [, conn] of this.connections) conn.close();
+    for (const { conn } of this.pendingConnections.values()) conn.close();
     this.connections.clear();
+    this.pendingConnections.clear();
   }
 }
