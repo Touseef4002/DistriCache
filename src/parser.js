@@ -1,14 +1,17 @@
+import { StringDecoder } from 'node:string_decoder';
+
 const MAX_COMMAND_LENGTH = 64 * 1024;
 
 export function createParser() {
   let buffer = '';
+  const decoder = new StringDecoder('utf8');
 
   /**
    * @param {Buffer|string} data
    * @returns {Array<{command: string, args: string[]}>}
    */
   function parse(data) {
-    buffer += data.toString();
+    buffer += decoder.write(Buffer.isBuffer(data) ? data : Buffer.from(data));
 
     const commands = [];
     let idx;

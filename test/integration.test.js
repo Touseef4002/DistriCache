@@ -103,6 +103,11 @@ describe('Integration: 3-node cluster', () => {
     expect(await client.get(key)).toBe(value);
   });
 
+  test('SET round-trips multibyte UTF-8 values', async () => {
+    await client.set('unicode', '你好 🌍 café');
+    expect(await client.get('unicode')).toBe('你好 🌍 café');
+  });
+
   test('SET overwrites existing key', async () => {
     await client.set('counter', 'one');
     expect(await client.get('counter')).toBe('one');

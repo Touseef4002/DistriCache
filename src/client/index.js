@@ -7,17 +7,19 @@ import { HealthChecker } from './health-checker.js';
  * @returns {string|number|null}
  */
 function parseResponse(raw) {
-  switch (raw[0]) {
-    case '+': return raw.slice(1, -2);
-    case '-': throw new Error(raw.slice(1, -2));
-    case ':': return parseInt(raw.slice(1, -2), 10);
+  const response = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+  const type = String.fromCharCode(response[0]);
+  switch (type) {
+    case '+': return response.toString('utf8', 1, response.length - 2);
+    case '-': throw new Error(response.toString('utf8', 1, response.length - 2));
+    case ':': return parseInt(response.toString('ascii', 1, response.length - 2), 10);
     case '$': {
-      const headerEnd = raw.indexOf('\r\n');
-      const length = parseInt(raw.slice(1, headerEnd), 10);
+      const headerEnd = response.indexOf('\r\n');
+      const length = parseInt(response.toString('ascii', 1, headerEnd), 10);
       if (length === -1) return null;
-      return raw.slice(headerEnd + 2, headerEnd + 2 + length);
+      return response.toString('utf8', headerEnd + 2, headerEnd + 2 + length);
     }
-    default: throw new Error(`Unknown response type: ${raw[0]}`);
+    default: throw new Error(`Unknown response type: ${type}`);
   }
 }
 

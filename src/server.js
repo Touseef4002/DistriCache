@@ -9,7 +9,10 @@ import { parsePositiveInteger } from './positive-integer.js';
 
 function simpleString(msg) { return `+${msg}\r\n`; }
 function errorString(msg)  { return `-ERR ${msg}\r\n`; }
-function bulkString(value) { return `$${value.length}\r\n${value}\r\n`; }
+function bulkString(value) {
+  const body = Buffer.from(value);
+  return Buffer.concat([Buffer.from(`$${body.length}\r\n`), body, Buffer.from('\r\n')]);
+}
 function nullBulk()        { return '$-1\r\n'; }
 function integerReply(n)   { return `:${n}\r\n`; }
 

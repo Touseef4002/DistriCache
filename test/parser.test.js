@@ -144,6 +144,17 @@ describe('createParser', () => {
     expect(commands).toEqual([{ command: 'PING', args: [] }]);
   });
 
+  test('preserves a UTF-8 character split across TCP chunks', () => {
+    const parser = createParser();
+    const command = Buffer.from('SET key "你好"\r\n');
+    const split = command.indexOf(Buffer.from('你')) + 1;
+
+    expect(parser.parse(command.subarray(0, split))).toEqual([]);
+    expect(parser.parse(command.subarray(split))).toEqual([
+      { command: 'SET', args: ['key', '你好'] },
+    ]);
+  });
+
   test('rejects commands larger than 64 Ki characters, complete or partial', () => {
     expect(() => createParser().parse(`${'x'.repeat(65537)}\r\n`)).toThrow('exceeds 64 Ki characters');
     expect(() => createParser().parse('x'.repeat(65537))).toThrow('exceeds 64 Ki characters');

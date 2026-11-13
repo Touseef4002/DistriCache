@@ -11,7 +11,7 @@ function parseAddress(address) {
 
 function createConnection(host, port) {
   const socket = new net.Socket();
-  let buffer = '';
+  let buffer = Buffer.alloc(0);
   let connected = false;
   let destroyed = false;
 
@@ -49,7 +49,7 @@ function createConnection(host, port) {
   }
 
   socket.on('data', (data) => {
-    buffer += data.toString();
+    buffer = Buffer.concat([buffer, data]);
     drainBuffer();
   });
 
@@ -64,34 +64,34 @@ function createConnection(host, port) {
 
   function drainBuffer() {
     while (pending.length > 0 && buffer.length > 0) {
-      const type = buffer[0];
+      const type = String.fromCharCode(buffer[0]);
 
       if (type === '+' || type === '-' || type === ':') {
         const end = buffer.indexOf('\r\n');
         if (end === -1) return;
 
-        pending.shift().resolve(buffer.slice(0, end + 2));
-        buffer = buffer.slice(end + 2);
+        pending.shift().resolve(buffer.subarray(0, end + 2).toString('utf8'));
+        buffer = buffer.subarray(end + 2);
       } else if (type === '$') {
         const headerEnd = buffer.indexOf('\r\n');
         if (headerEnd === -1) return;
 
-        const length = parseInt(buffer.slice(1, headerEnd), 10);
+        const length = parseInt(buffer.toString('ascii', 1, headerEnd), 10);
 
         if (length === -1) {
-          pending.shift().resolve(buffer.slice(0, headerEnd + 2));
-          buffer = buffer.slice(headerEnd + 2);
+          pending.shift().resolve(buffer.subarray(0, headerEnd + 2).toString('utf8'));
+          buffer = buffer.subarray(headerEnd + 2);
         } else {
           const totalNeeded = headerEnd + 2 + length + 2;
           if (buffer.length < totalNeeded) return;
 
-          pending.shift().resolve(buffer.slice(0, totalNeeded));
-          buffer = buffer.slice(totalNeeded);
+          pending.shift().resolve(buffer.subarray(0, totalNeeded).toString('utf8'));
+          buffer = buffer.subarray(totalNeeded);
         }
       } else {
         pending.shift().reject(new Error(`Unknown response type: ${type}`));
         const end = buffer.indexOf('\r\n');
-        buffer = end !== -1 ? buffer.slice(end + 2) : '';
+        buffer = end !== -1 ? buffer.subarray(end + 2) : Buffer.alloc(0);
       }
     }
   }
