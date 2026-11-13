@@ -31,6 +31,17 @@ describe('tokenize', () => {
     expect(tokenize('"key one" "value two"')).toEqual(['key one', 'value two']);
   });
 
+  test('decodes escaped quotes and backslashes in quoted strings', () => {
+    expect(tokenize('SET key "say \\"hi\\" \\\\ there"')).toEqual([
+      'SET', 'key', 'say "hi" \\ there',
+    ]);
+  });
+
+  test('preserves empty quoted arguments and rejects unterminated quotes', () => {
+    expect(tokenize('SET key ""')).toEqual(['SET', 'key', '']);
+    expect(() => tokenize('SET key "unfinished')).toThrow('unterminated quoted string');
+  });
+
   test('handles empty input', () => {
     expect(tokenize('')).toEqual([]);
   });
@@ -131,6 +142,11 @@ describe('createParser', () => {
     const commands = parser.parse(Buffer.from('PING\r\n'));
 
     expect(commands).toEqual([{ command: 'PING', args: [] }]);
+  });
+
+  test('rejects commands larger than 64 Ki characters, complete or partial', () => {
+    expect(() => createParser().parse(`${'x'.repeat(65537)}\r\n`)).toThrow('exceeds 64 Ki characters');
+    expect(() => createParser().parse('x'.repeat(65537))).toThrow('exceeds 64 Ki characters');
   });
 
   test('each parser instance has its own buffer', () => {

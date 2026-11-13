@@ -96,6 +96,13 @@ describe('Integration: 3-node cluster', () => {
     expect(value).toBe('hello world');
   });
 
+  test('SET round-trips quoted keys, quotes, and backslashes', async () => {
+    const key = 'key with spaces';
+    const value = 'say "hello" \\ there';
+    await client.set(key, value);
+    expect(await client.get(key)).toBe(value);
+  });
+
   test('SET overwrites existing key', async () => {
     await client.set('counter', 'one');
     expect(await client.get('counter')).toBe('one');

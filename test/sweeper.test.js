@@ -74,14 +74,13 @@ describe('Sweeper', () => {
 
     Date.now = () => realNow() + 2000;
 
-    // Sweep with batch size of 5 — can only remove up to 5 per sweep
+    // Each sweep checks 5 distinct keys and resumes at the next key.
     const sweeper = createSweeper(store, { intervalMs: 999999, batchSize: 5 });
     sweeper._sweep();
+    expect(store.size()).toBe(95);
+    sweeper._sweep();
     sweeper.stop();
-
-    // The sweep checks at most 5 distinct keys.
-    expect(store.size()).toBeGreaterThanOrEqual(95);
-    expect(store.size()).toBeLessThanOrEqual(100);
+    expect(store.size()).toBe(90);
   });
 
   test('handles empty store gracefully', () => {
@@ -147,7 +146,7 @@ describe('Sweeper', () => {
 
     sweeper.stop();
 
-    // Second sweep should have removed more (or equal if all were already gone)
-    expect(sizeAfterSecond).toBeLessThanOrEqual(sizeAfterFirst);
+    expect(sizeAfterFirst).toBe(40);
+    expect(sizeAfterSecond).toBe(30);
   });
 });

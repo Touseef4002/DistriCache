@@ -203,7 +203,7 @@ docker-compose down
 
 ```bash
 npm test
-# → 119 tests passing across 8 test suites
+# → 137 tests passing across 10 test suites
 ```
 
 ### Configuration
@@ -359,7 +359,7 @@ DistriCache/
 │       ├── hash-ring.js       # Consistent hashing with virtual nodes
 │       ├── connection-pool.js # Persistent TCP connection pooling
 │       └── health-checker.js  # PING-based failure detection state machine
-├── test/                      # 119 tests across 8 suites
+├── test/                      # 137 tests across 10 suites
 │   ├── lru.test.js            # Linked list unit tests
 │   ├── parser.test.js         # Protocol parser tests
 │   ├── store.test.js          # Store + LRU + TTL tests

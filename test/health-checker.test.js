@@ -22,6 +22,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from '@jest/globals';
+import net from 'node:net';
 import { createCacheServer } from '../src/server.js';
 import { HealthChecker, NodeState } from '../src/client/health-checker.js';
 import { ConsistentHashRing } from '../src/client/hash-ring.js';
@@ -67,6 +68,36 @@ function waitForCondition(predicate, description, timeoutMs = 5000, intervalMs =
 // ─── Unit tests (no servers needed) ──────────────────────────────────
 
 describe('HealthChecker — unit (no servers)', () => {
+  test('does not overlap probes for the same node', async () => {
+    let active = 0;
+    let maxActive = 0;
+    const server = net.createServer(socket => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      let responseTimer;
+      socket.once('close', () => {
+        active--;
+        clearTimeout(responseTimer);
+      });
+      socket.once('data', () => {
+        responseTimer = setTimeout(() => socket.end('+PONG\r\n'), 50);
+      });
+    });
+    const port = await new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
+    const node = `127.0.0.1:${port}`;
+    const checker = new HealthChecker([node], new ConsistentHashRing([node]), {
+      pingInterval: 5,
+      pingTimeout: 500,
+    });
+
+    checker.start();
+    await new Promise(resolve => setTimeout(resolve, 140));
+    checker.stop();
+    await new Promise(resolve => server.close(resolve));
+
+    expect(maxActive).toBe(1);
+  });
+
   test('all nodes start as healthy', () => {
     const ring = new ConsistentHashRing(TEST_NODES);
     const checker = new HealthChecker(TEST_NODES, ring, HEALTH_OPTIONS);
