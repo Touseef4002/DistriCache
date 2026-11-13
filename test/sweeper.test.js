@@ -34,8 +34,7 @@ describe('Sweeper', () => {
     // Fast-forward past TTL
     Date.now = () => realNow() + 2000;
 
-    // batchSize (100) > key count (3), so the sweeper will do a full
-    // deterministic scan instead of random sampling — one sweep is enough.
+    // batchSize (100) > key count (3), so one sweep checks every key.
     const sweeper = createSweeper(store, { intervalMs: 999999, batchSize: 100 });
 
     sweeper._sweep();
@@ -65,7 +64,7 @@ describe('Sweeper', () => {
     expect(store.size()).toBe(3);
   });
 
-  test('respects batch size — only samples batchSize keys per sweep', () => {
+  test('respects batch size — checks at most batchSize keys per sweep', () => {
     const store = new Store();
 
     // Create 100 keys, all expired
@@ -80,8 +79,7 @@ describe('Sweeper', () => {
     sweeper._sweep();
     sweeper.stop();
 
-    // At most 5 keys should have been removed (could be fewer if same key
-    // was randomly sampled twice, but definitely not more than 5)
+    // The sweep checks at most 5 distinct keys.
     expect(store.size()).toBeGreaterThanOrEqual(95);
     expect(store.size()).toBeLessThanOrEqual(100);
   });
@@ -105,8 +103,7 @@ describe('Sweeper', () => {
 
     Date.now = () => realNow() + 2000;
 
-    // One sweep is enough — batchSize (100) > key count (2) triggers
-    // deterministic full scan.
+    // One sweep is enough — batchSize (100) covers both keys.
     const sweeper = createSweeper(store, { intervalMs: 999999, batchSize: 100 });
     sweeper._sweep();
     sweeper.stop();
@@ -142,7 +139,7 @@ describe('Sweeper', () => {
 
     Date.now = () => realNow() + 2000;
 
-    // Each sweep samples 10 keys — multiple sweeps should clean more
+    // Each sweep checks the next 10 keys — multiple sweeps should clean more
     const sweeper = createSweeper(store, { intervalMs: 999999, batchSize: 10 });
 
     const sizeAfterFirst = (() => { sweeper._sweep(); return store.size(); })();

@@ -9,23 +9,23 @@ export function createSweeper(store, options = {}) {
   const batchSize = options.batchSize
     ?? (process.env.EXPIRY_SWEEP_BATCH ? parseInt(process.env.EXPIRY_SWEEP_BATCH, 10) : 20);
   const log = options.logger || null;
+  let keys = store.keys();
 
   function sweep() {
-    if (store.size() === 0) return;
+    if (store.size() === 0) {
+      keys = store.keys();
+      return;
+    }
 
-    const allKeys = Array.from(store.keys());
-    const sampleCount = Math.min(batchSize, allKeys.length);
     let expiredCount = 0;
 
-    if (sampleCount >= allKeys.length) {
-      for (let i = 0; i < allKeys.length; i++) {
-        if (store.deleteIfExpired(allKeys[i])) expiredCount++;
+    for (let i = 0; i < batchSize; i++) {
+      const next = keys.next();
+      if (next.done) {
+        keys = store.keys();
+        break;
       }
-    } else {
-      for (let i = 0; i < sampleCount; i++) {
-        const key = allKeys[Math.floor(Math.random() * allKeys.length)];
-        if (store.deleteIfExpired(key)) expiredCount++;
-      }
+      if (store.deleteIfExpired(next.value)) expiredCount++;
     }
 
     if (expiredCount > 0 && log) {

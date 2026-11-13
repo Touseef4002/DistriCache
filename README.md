@@ -352,7 +352,7 @@ DistriCache/
 │   ├── parser.js              # Wire protocol parser (stream buffering, quoted strings)
 │   ├── store.js               # HashMap + LRU list (the O(1) cache)
 │   ├── lru.js                 # Doubly linked list with sentinel nodes
-│   ├── sweeper.js             # Active TTL expiry (background random sampling)
+│   ├── sweeper.js             # Active TTL expiry (incremental key batches)
 │   ├── logger.js              # Structured logging (levels, NODE_ID prefix)
 │   └── client/
 │       ├── index.js           # DistriCacheClient (public API)
